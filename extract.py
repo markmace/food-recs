@@ -21,7 +21,6 @@ visited, or recommended in this video. A video may feature multiple shops, or no
 compilation intro, a non-ramen video, or a video where no specific restaurant is named).
 
 For each shop, output a JSON object with these fields:
-- creator: the channel name ({channel})
 - place_name_en: the shop's name in English/romaji, or null if unknown
 - place_name_local: the shop's name in Japanese script if given, or null
 - neighborhood: the neighborhood/area mentioned (e.g. Shibuya, Ebisu), or null if not mentioned
@@ -32,9 +31,6 @@ only if truly unclear.
 - sentiment: one of "loved", "liked", "mixed", "negative", or null if unclear
 - price_signal: any price info mentioned (e.g. "¥980", "budget", "pricey"), or null
 - maps_url: a Google Maps URL for the shop if one appears in the description, or null
-- source_url: {url}
-- source_title: {title}
-- published_at: {published_at}
 - confidence: "high" if clearly and unambiguously named, "medium" if reasonably confident, \
 "low" if you are guessing/inferring
 
@@ -96,8 +92,14 @@ def try_parse_json_array(text: str) -> list | None:
     return data if isinstance(data, list) else None
 
 
-def validate_shops(shops: list, video: dict, case: dict) -> list[dict]:
-    url = f"https://www.youtube.com/watch?v={video['video_id']}"
+# String-typed fields that must actually be strings (or None) by the time they
+# reach export.py's dedupe/CSV logic -- Claude occasionally nests an object or
+# list where a plain string was asked for, and downstream code assumes str.
+STRING_FIELDS = ("place_name_en", "place_name_local", "neighborhood", "city",
+                  "category", "price_signal", "maps_url")
+
+
+def validate_shops(shops: list, video: dict, case: dict, url: str) -> list[dict]:
     result = []
     for shop in shops:
         if not isinstance(shop, dict):
@@ -109,13 +111,15 @@ def validate_shops(shops: list, video: dict, case: dict) -> list[dict]:
         shop["published_at"] = video["published_at"]
         if not shop.get("place_name_en") and not shop.get("place_name_local"):
             continue  # no usable name -- drop rather than emit a nameless row
-        if shop.get("sentiment") not in VALID_SENTIMENTS:
+        for key in STRING_FIELDS:
+            if not isinstance(shop.get(key), str):
+                shop[key] = None
+        # isinstance check first: an unhashable value (list/dict) would raise on
+        # the `in` membership test otherwise.
+        if not isinstance(shop.get("sentiment"), str) or shop["sentiment"] not in VALID_SENTIMENTS:
             shop["sentiment"] = None
-        if shop.get("confidence") not in VALID_CONFIDENCE:
+        if not isinstance(shop.get("confidence"), str) or shop["confidence"] not in VALID_CONFIDENCE:
             shop["confidence"] = None
-        for key in ("place_name_en", "place_name_local", "neighborhood", "city",
-                    "category", "price_signal", "maps_url"):
-            shop.setdefault(key, None)
         result.append(shop)
     return result
 
@@ -142,7 +146,7 @@ def extract_shops_from_video(video: dict, case: dict, client) -> list[dict]:
             print(f"WARNING: giving up on malformed JSON for video {video['video_id']} after retry")
             return []
 
-    return validate_shops(shops, video, case)
+    return validate_shops(shops, video, case, url)
 
 
 def load_or_extract(videos: list[dict], case: dict, client) -> list[dict]:

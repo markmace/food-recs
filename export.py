@@ -20,8 +20,8 @@ CSV_COLUMNS = [
 ]
 
 
-def normalize_name(name: str | None) -> str:
-    if not name:
+def normalize_name(name) -> str:
+    if not isinstance(name, str):
         return ""
     name = name.lower().strip()
     name = re.sub(r"[.''\-]", " ", name)
@@ -36,8 +36,10 @@ def _comparison_name(name: str | None) -> str:
     return re.sub(r"\bramen\b", "", normalized).strip()
 
 
-def normalize_city(city: str | None) -> str:
-    return (city or "").strip().lower()
+def normalize_city(city) -> str:
+    if not isinstance(city, str):
+        return ""
+    return city.strip().lower()
 
 
 class _UnionFind:
@@ -107,21 +109,27 @@ def _merge_cluster(records: list[dict]) -> dict:
     }
 
 
-def _same_place(name_a: str, name_b: str, neighborhood_a: str, neighborhood_b: str,
-                 maps_url_a: str | None, maps_url_b: str | None) -> bool:
+def _same_place(a: dict, b: dict) -> bool:
+    name_a = _comparison_name(a.get("place_name_en") or a.get("place_name_local"))
+    name_b = _comparison_name(b.get("place_name_en") or b.get("place_name_local"))
     if not name_a or not name_b:
         return False
 
     # maps_url is the strongest signal available -- let it decide outright when
-    # both sides have one, whichever direction that points.
+    # both sides have one, regardless of city/neighborhood text (which may be
+    # null on one side while a maps_url still confirms the same place).
+    maps_url_a, maps_url_b = a.get("maps_url"), b.get("maps_url")
     if maps_url_a and maps_url_b:
         return maps_url_a == maps_url_b
 
-    # Without a confirmed shared neighborhood, a name-only match isn't reliable
-    # evidence of the same place: many ramen shops share generic naming, and a
-    # missing neighborhood on either side could just as easily mean a different
-    # branch as the same one. Require both neighborhoods present and equal --
-    # undermerge over overmerge.
+    # Without a maps_url match, require a confirmed shared city AND neighborhood
+    # before trusting name similarity -- many ramen shops share generic naming,
+    # and a missing city/neighborhood on either side could just as easily mean a
+    # different branch as the same one. Undermerge over overmerge.
+    city_a, city_b = normalize_city(a.get("city")), normalize_city(b.get("city"))
+    if not city_a or not city_b or city_a != city_b:
+        return False
+    neighborhood_a, neighborhood_b = normalize_name(a.get("neighborhood")), normalize_name(b.get("neighborhood"))
     if not neighborhood_a or not neighborhood_b or neighborhood_a != neighborhood_b:
         return False
 
@@ -129,32 +137,34 @@ def _same_place(name_a: str, name_b: str, neighborhood_a: str, neighborhood_b: s
 
 
 def dedupe_places(places: list[dict]) -> list[dict]:
-    by_city: dict[str, list[dict]] = defaultdict(list)
-    for place in places:
-        by_city[normalize_city(place.get("city"))].append(place)
+    # A single pass over all places (not pre-bucketed by city) so the maps_url
+    # shortcut in _same_place can still catch a match even when one mention has
+    # a null/differently-cased city and the other doesn't.
+    uf = _UnionFind(len(places))
+    for i in range(len(places)):
+        for j in range(i + 1, len(places)):
+            if _same_place(places[i], places[j]):
+                uf.union(i, j)
 
-    merged = []
-    for city_places in by_city.values():
-        uf = _UnionFind(len(city_places))
-        names = [_comparison_name(p.get("place_name_en") or p.get("place_name_local")) for p in city_places]
-        neighborhoods = [normalize_name(p.get("neighborhood")) for p in city_places]
-        maps_urls = [p.get("maps_url") for p in city_places]
+    clusters: dict[int, list[dict]] = defaultdict(list)
+    for idx, place in enumerate(places):
+        clusters[uf.find(idx)].append(place)
 
-        for i in range(len(city_places)):
-            for j in range(i + 1, len(city_places)):
-                if _same_place(names[i], names[j], neighborhoods[i], neighborhoods[j],
-                                maps_urls[i], maps_urls[j]):
-                    uf.union(i, j)
-
-        clusters: dict[int, list[dict]] = defaultdict(list)
-        for idx, place in enumerate(city_places):
-            clusters[uf.find(idx)].append(place)
-
-        for cluster in clusters.values():
-            merged.append(_merge_cluster(cluster))
-
+    merged = [_merge_cluster(cluster) for cluster in clusters.values()]
     merged.sort(key=lambda p: (p["neighborhood"] is None, p["neighborhood"] or "", p["place_name_en"] or p["place_name_local"] or ""))
     return merged
+
+
+# Excel/Sheets treats a cell starting with any of these as a formula. Values
+# here ultimately trace back to arbitrary YouTube video text via Claude, so
+# guard against CSV formula injection when the CSV is opened in a spreadsheet.
+_FORMULA_PREFIXES = ("=", "+", "-", "@")
+
+
+def _csv_safe(value):
+    if isinstance(value, str) and value.startswith(_FORMULA_PREFIXES):
+        return "'" + value
+    return value
 
 
 def write_csv(places: list[dict], output_path: str) -> None:
@@ -162,20 +172,16 @@ def write_csv(places: list[dict], output_path: str) -> None:
         writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
         writer.writeheader()
         for place in places:
-            writer.writerow({col: place.get(col) for col in CSV_COLUMNS})
+            writer.writerow({col: _csv_safe(place.get(col)) for col in CSV_COLUMNS})
 
 
-def export_case(places: list[dict], case: dict, filter_stats: dict, videos_fetched: int) -> None:
+def export_case(places: list[dict], case: dict) -> None:
     deduped = dedupe_places(places)
     write_csv(deduped, case["output_csv"])
     low_confidence = sum(1 for p in deduped if p["confidence"] == "low")
-    filtered_count = filter_stats["keyword_matched"] + filter_stats["llm_matched"]
 
     print()
     print("== Summary ==")
-    print(f"Total videos fetched: {videos_fetched}")
-    print(f"Filtered in: {filtered_count} (keyword: {filter_stats['keyword_matched']}, "
-          f"LLM: {filter_stats['llm_matched']}, dropped: {filter_stats['dropped']})")
     print(f"Unique shops: {len(deduped)}")
     print(f"Low-confidence shops: {low_confidence}")
     print(f"CSV written to: {case['output_csv']}")

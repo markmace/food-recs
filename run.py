@@ -20,7 +20,14 @@ def main():
     if not yt_api_key:
         sys.exit("Missing YT_API_KEY -- set it in .env")
 
-    case = json.loads(Path(sys.argv[1]).read_text())
+    case_path = Path(sys.argv[1])
+    try:
+        case = json.loads(case_path.read_text())
+    except FileNotFoundError:
+        sys.exit(f"Case file not found: {case_path}")
+    except json.JSONDecodeError as e:
+        sys.exit(f"Case file {case_path} is not valid JSON: {e}")
+
     client = anthropic.Anthropic()  # raises its own clear error if ANTHROPIC_API_KEY unset
 
     videos = load_or_fetch_videos(case, yt_api_key)
@@ -32,7 +39,7 @@ def main():
           f"Dropped: {filter_stats['dropped']}")
 
     places = load_or_extract(filtered, case, client)
-    export_case(places, case, filter_stats, len(videos))
+    export_case(places, case)
 
 
 if __name__ == "__main__":
