@@ -1,4 +1,5 @@
 import json
+import threading
 from pathlib import Path
 
 MODEL = "claude-haiku-4-5"
@@ -22,12 +23,14 @@ class CostTracker:
 
     def __init__(self):
         self._stages: dict[str, dict[str, int]] = {}
+        self._lock = threading.Lock()
 
     def record(self, stage: str, usage) -> None:
-        stats = self._stages.setdefault(stage, {"calls": 0, "input_tokens": 0, "output_tokens": 0})
-        stats["calls"] += 1
-        stats["input_tokens"] += usage.input_tokens
-        stats["output_tokens"] += usage.output_tokens
+        with self._lock:
+            stats = self._stages.setdefault(stage, {"calls": 0, "input_tokens": 0, "output_tokens": 0})
+            stats["calls"] += 1
+            stats["input_tokens"] += usage.input_tokens
+            stats["output_tokens"] += usage.output_tokens
 
     def write(self, case: dict, output_path: str) -> str:
         by_stage = {}

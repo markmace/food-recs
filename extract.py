@@ -1,8 +1,13 @@
+import concurrent.futures
 import hashlib
 import json
+import threading
 from pathlib import Path
 
 from cost import MODEL
+
+MAX_WORKERS = 8  # concurrent Claude calls -- these are independent per-video requests;
+                  # the SDK's built-in retry handles any transient 429s from going this wide
 
 EXTRACTION_PROMPT = """You are extracting structured data from a YouTube video for a personal \
 database.
@@ -57,18 +62,30 @@ exactly one word: yes or no."""
 
 
 def filter_videos(videos: list[dict], case: dict, client, tracker) -> tuple[list[dict], dict]:
-    kept = []
     stats = {"keyword_matched": 0, "llm_matched": 0, "dropped": 0}
+    stats_lock = threading.Lock()
+
+    keep: dict[str, bool] = {}
+    to_check = []
     for video in videos:
         if keyword_match(video, case["filter_keywords"]):
-            kept.append(video)
+            keep[video["video_id"]] = True
             stats["keyword_matched"] += 1
-        elif classify_relevance(video, case, client, tracker):
-            kept.append(video)
-            stats["llm_matched"] += 1
         else:
-            stats["dropped"] += 1
-    return kept, stats
+            to_check.append(video)
+
+    def check(video: dict) -> tuple[str, bool]:
+        relevant = classify_relevance(video, case, client, tracker)
+        with stats_lock:
+            stats["llm_matched" if relevant else "dropped"] += 1
+        return video["video_id"], relevant
+
+    if to_check:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            for video_id, relevant in pool.map(check, to_check):
+                keep[video_id] = relevant
+
+    return [v for v in videos if keep.get(v["video_id"])], stats
 
 
 def try_parse_json_array(text: str) -> list | None:
@@ -92,7 +109,12 @@ def validate_items(items: list, video: dict, case: dict, url: str) -> list[dict]
         if not isinstance(item, dict):
             continue
         for key in field_names:
-            if not isinstance(item.get(key), str):
+            value = item.get(key)
+            if isinstance(value, bool):
+                item[key] = "true" if value else "false"
+            elif isinstance(value, (int, float)):
+                item[key] = str(value)
+            elif not isinstance(value, str):
                 item[key] = None
         if not any(item.get(key) for key in field_names):
             continue
@@ -164,15 +186,28 @@ def load_or_extract(videos: list[dict], case: dict, client, tracker) -> list[dic
                 record = json.loads(line)
                 cached[record["video_id"]] = record["items"]
 
-    all_items = []
-    with open(cache_path, "a") as f:
-        for video in videos:
-            if video["video_id"] in cached:
-                items = cached[video["video_id"]]
-            else:
-                items = extract_items_from_video(video, case, client, tracker)
-                f.write(json.dumps({"video_id": video["video_id"], "items": items}) + "\n")
-                f.flush()
-            all_items.extend(items)
+    results = dict(cached)
+    to_extract = [v for v in videos if v["video_id"] not in cached]
 
+    if to_extract:
+        write_lock = threading.Lock()
+        done = 0
+        with open(cache_path, "a") as f, \
+                concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+            futures = {pool.submit(extract_items_from_video, v, case, client, tracker): v
+                       for v in to_extract}
+            for future in concurrent.futures.as_completed(futures):
+                video = futures[future]
+                items = future.result()
+                results[video["video_id"]] = items
+                with write_lock:
+                    f.write(json.dumps({"video_id": video["video_id"], "items": items}) + "\n")
+                    f.flush()
+                    done += 1
+                    if done % 25 == 0 or done == len(to_extract):
+                        print(f"  extracted {done}/{len(to_extract)}")
+
+    all_items = []
+    for video in videos:
+        all_items.extend(results.get(video["video_id"], []))
     return all_items
