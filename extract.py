@@ -132,6 +132,15 @@ def extract_items_from_video(video: dict, case: dict, client, tracker) -> list[d
     return validate_items(items, video, case, url)
 
 
+def _cache_matches_fields(cached: dict, field_names: list[str]) -> bool:
+    expected = set(field_names)
+    for items in cached.values():
+        for item in items:
+            if not expected.issubset(item.keys()):
+                return False
+    return True
+
+
 def load_or_extract(videos: list[dict], case: dict, client, tracker) -> list[dict]:
     cache_path = Path("data/extracted") / f"{case['name']}.jsonl"
     cache_path.parent.mkdir(parents=True, exist_ok=True)
@@ -142,6 +151,13 @@ def load_or_extract(videos: list[dict], case: dict, client, tracker) -> list[dic
             for line in f:
                 record = json.loads(line)
                 cached[record["video_id"]] = record["items"]
+
+        field_names = [f["name"] for f in case["fields"]]
+        if not _cache_matches_fields(cached, field_names):
+            print(f"Extraction cache for '{case['name']}' doesn't match the current fields "
+                  f"config -- discarding it and re-extracting all videos")
+            cached = {}
+            cache_path.unlink()
 
     all_items = []
     with open(cache_path, "a") as f:
