@@ -1,8 +1,0 @@
-{
-  "name": "tokyo_ramen",
-  "source": "youtube",
-  "channel": "5 AM Ramen",
-  "topic": "ramen restaurants in Tokyo",
-  "filter_keywords": ["tokyo", "shibuya", "shinjuku", "nakameguro", "ebisu", "ginza", "ikebukuro", "ueno", "asakusa"],
-  "output_csv": "data/tokyo_ramen.csv"
-}
