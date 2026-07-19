@@ -1,32 +1,37 @@
 # food-recs
 
 Extract structured data from a YouTube channel into a CSV — filter videos, pull out
-subjects with Claude, dedupe across videos, and write one row per item.
+items with Claude using fields *you* define, optionally dedupe across videos, and write
+one row per item.
 
 Example uses: every product a reviewer covers, every place mentioned in travel videos,
-tools referenced in a tutorial channel, etc.
+every bowl of ramen featured in a food channel, tools referenced in a tutorial channel, etc.
 
 ## How it works
 
 ```
-YouTube API  →  filter  →  Claude (Haiku)  →  dedupe  →  CSV
+YouTube API  →  filter  →  Claude (Haiku)  →  (optional dedupe)  →  CSV
 ```
 
 1. **Fetch** — pulls every video (title, description, publish date) from a channel via
    the official YouTube Data API. No downloads, no transcript scraping.
 2. **Filter** — keeps videos matching your keywords; anything ambiguous gets a cheap
    yes/no relevance check from Claude instead of being silently dropped.
-3. **Extract** — Claude reads each video's title/description and pulls out structured
-   fields (subject, category, details, sentiment, confidence, etc).
-4. **Dedupe & export** — merges the same subject mentioned across multiple videos and
-   writes one row per unique item to a CSV.
+3. **Extract** — Claude reads each video's title/description and pulls out whatever
+   fields you defined in the case file (see below).
+4. **Export** — if you configured `dedupe_fields`, merges items that match on those
+   fields across videos; otherwise every extracted item becomes its own row. Writes the
+   CSV.
 
 Results are cached along the way (`data/raw/`, `data/extracted/`), so re-running a case
 is fast and doesn't re-spend API calls.
 
-Every run also writes a cost report next to the CSV (e.g. `data/my_case_cost.json`) with
-a token and dollar breakdown by pipeline stage (filtering vs. extraction) for the API
-calls actually made *that run* — a fully-cached rerun reports close to $0.
+Every run writes its own timestamped CSV and cost report (e.g.
+`data/my_case_20260719_153000.csv` / `..._cost.json`), so running the same case multiple
+times — while tuning fields, testing with `--limit`, etc. — never overwrites a previous
+run's output. The cost report has a token and dollar breakdown by pipeline stage
+(filtering vs. extraction) for the API calls actually made *that run* — a fully-cached
+rerun reports close to $0.
 
 ## Setup
 
@@ -56,9 +61,13 @@ Copy the example case and configure it for a channel and topic you care about:
 
 ```bash
 cp cases/example.json cases/my_case.json
-# edit my_case.json — set channel, topic, filter_keywords, output_csv
+# edit my_case.json — set channel, topic, fields, filter_keywords, output_csv
 uv run python run.py cases/my_case.json
 ```
+
+Name a case `cases/*.local.json` (e.g. `cases/tokyo_ramen.local.json`) to keep it out of
+git — that pattern is already in `.gitignore`, handy for cases you're iterating on but
+don't want in the public repo.
 
 ## Case file format
 
@@ -68,13 +77,52 @@ uv run python run.py cases/my_case.json
   "source": "youtube",
   "channel": "Channel Name",
   "topic": "product reviews",
+  "item_description": "one row per distinct product reviewed in the video",
   "filter_keywords": ["review", "hands-on"],
-  "output_csv": "data/my_case.csv"
+  "fields": [
+    {"name": "product", "description": "Name of the product being reviewed"},
+    {"name": "category", "description": "Type or category of product, or null"},
+    {"name": "notes", "description": "Relevant details: specs, price, use case, etc."},
+    {"name": "verdict", "description": "The reviewer's overall opinion or recommendation"}
+  ],
+  "dedupe_fields": ["product"],
+  "output_csv": "data/my_case.csv",
+  "limit": 5
 }
 ```
 
 `topic` drives the LLM prompts — describe what you're trying to collect in plain
 language. `filter_keywords` narrow which videos get processed.
+
+`fields` defines your output schema — Claude extracts exactly the fields you list, using
+your descriptions as instructions. There's no fixed schema; name and describe whatever
+columns make sense for your case. `item_description` tells Claude what one row
+represents — e.g. `"one row per distinct bowl of ramen ordered or featured in the
+video"` if you want per-dish granularity rather than one row per place/video. Every row
+also automatically gets `channel`, `video`, `video_url`, and `published_at` — you don't
+need to list those yourself.
+
+`dedupe_fields` (optional) is a list of your field names to merge on across videos —
+e.g. `["product"]` merges the same product mentioned in multiple videos into one row
+(unioning source videos). Fuzzy-matches on those fields only; all listed fields must
+agree (or be null on both sides) for two items to merge, and unrelated fields are kept
+from the merged records. Leave it out and every extracted item becomes its own row with
+no merging — the right choice whenever repeats across videos are expected and
+*shouldn't* collapse (e.g. one row per bowl of ramen — the same shop across two videos
+is two different bowls, not a duplicate).
+
+`limit` (optional) caps the pipeline to the first N fetched videos — handy for a quick,
+cheap test before running the full channel. You can also pass `--limit`/`-l` on the
+command line instead of (or in addition to) setting it in the case file:
+
+```bash
+uv run python run.py cases/my_case.json --limit 5
+uv run python run.py cases/my_case.json -l 5
+```
+
+If neither is set, the full video list is processed. If both are set, `--limit` wins.
+Either way, use a separate case file (distinct `name`/`output_csv`) for test runs so
+they don't overwrite your real cache/output — see `cases/test_example.json`.
 
 ## Notes
 

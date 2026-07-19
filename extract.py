@@ -3,9 +3,6 @@ from pathlib import Path
 
 from cost import MODEL
 
-VALID_SENTIMENTS = {"loved", "liked", "mixed", "negative"}
-VALID_CONFIDENCE = {"high", "medium", "low"}
-
 EXTRACTION_PROMPT = """You are extracting structured data from a YouTube video for a personal \
 database.
 
@@ -17,21 +14,18 @@ Published: {published_at}
 Video description:
 {description}
 
-Identify every distinct subject mentioned in the title/description that fits the topic. A \
-video may mention multiple subjects, or none (e.g. an intro, off-topic video, or one with \
-nothing specific to extract).
+Extract {item_description}. A video may contain multiple such items, or none (e.g. an intro, \
+off-topic video, or one with nothing specific to extract).
 
-For each subject, output a JSON object with these fields:
-- subject: the name or title of what's being discussed
-- category: a type or classification if mentioned, or null
-- details: relevant context (location, specs, price, etc.), or null
-- sentiment: one of "loved", "liked", "mixed", "negative", or null if unclear
-- link: a relevant URL from the description if one appears, or null
-- confidence: "high" if clearly and unambiguously identified, "medium" if reasonably confident, \
-"low" if you are guessing/inferring
+For each item, output a JSON object with these fields:
+{field_list}
 
 Respond with ONLY a JSON array of these objects (use [] if nothing fits). Do not include any \
 other text, explanation, or markdown formatting."""
+
+
+def build_field_list(fields: list[dict]) -> str:
+    return "\n".join(f"- {f['name']}: {f['description']} (use null if not mentioned)" for f in fields)
 
 
 def keyword_match(video: dict, keywords: list[str]) -> bool:
@@ -90,36 +84,32 @@ def try_parse_json_array(text: str) -> list | None:
     return data if isinstance(data, list) else None
 
 
-STRING_FIELDS = ("subject", "category", "details", "link")
-
-
 def validate_items(items: list, video: dict, case: dict, url: str) -> list[dict]:
+    field_names = [f["name"] for f in case["fields"]]
     result = []
     for item in items:
         if not isinstance(item, dict):
+            continue
+        for key in field_names:
+            if not isinstance(item.get(key), str):
+                item[key] = None
+        if not any(item.get(key) for key in field_names):
             continue
         item["channel"] = case["channel"]
         item["source_url"] = url
         item["source_title"] = video["title"]
         item["published_at"] = video["published_at"]
-        if not item.get("subject"):
-            continue
-        for key in STRING_FIELDS:
-            if not isinstance(item.get(key), str):
-                item[key] = None
-        if not isinstance(item.get("sentiment"), str) or item["sentiment"] not in VALID_SENTIMENTS:
-            item["sentiment"] = None
-        if not isinstance(item.get("confidence"), str) or item["confidence"] not in VALID_CONFIDENCE:
-            item["confidence"] = None
         result.append(item)
     return result
 
 
 def extract_items_from_video(video: dict, case: dict, client, tracker) -> list[dict]:
     url = f"https://www.youtube.com/watch?v={video['video_id']}"
+    item_description = case.get("item_description", f"distinct items related to {case['topic']}")
     prompt = EXTRACTION_PROMPT.format(
         topic=case["topic"], channel=case["channel"], title=video["title"], url=url,
         published_at=video["published_at"], description=video["description"],
+        item_description=item_description, field_list=build_field_list(case["fields"]),
     )
     messages = [{"role": "user", "content": prompt}]
     response = client.messages.create(model=MODEL, max_tokens=2048, messages=messages)

@@ -29,9 +29,7 @@ class CostTracker:
         stats["input_tokens"] += usage.input_tokens
         stats["output_tokens"] += usage.output_tokens
 
-    def write(self, case: dict) -> str:
-        output_path = str(Path(case["output_csv"]).with_suffix("")) + "_cost.json"
-
+    def write(self, case: dict, output_path: str) -> str:
         by_stage = {}
         total_calls = total_input = total_output = 0
         for stage, stats in self._stages.items():

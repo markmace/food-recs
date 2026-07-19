@@ -14,3 +14,6 @@ wheels/
 
 # Pipeline outputs and API caches
 data/
+
+# Private case configs -- not meant for the public repo
+cases/*.local.json

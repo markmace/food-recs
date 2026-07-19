@@ -1,5 +1,5 @@
 {
-  "name": "example",
+  "name": "test_example",
   "source": "youtube",
   "channel": "Your YouTube Channel",
   "topic": "product reviews",
@@ -12,5 +12,6 @@
     {"name": "verdict", "description": "The reviewer's overall opinion or recommendation"}
   ],
   "dedupe_fields": ["product"],
-  "output_csv": "data/example.csv"
+  "output_csv": "data/test_example.csv",
+  "limit": 5
 }
