@@ -5,17 +5,10 @@ from collections import defaultdict
 from rapidfuzz import fuzz
 
 CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1, None: 0}
-
-# fuzz.ratio, not WRatio -- WRatio's partial-ratio component scores nearly any
-# "one name is a prefix of the other" pair at ~90 regardless of how much text is
-# appended (e.g. "Ramen Jiro" vs "Ramen Jiro Mita Honten", different branches,
-# scores 90), which made the old threshold merge unrelated chain branches. Plain
-# ratio separates these cleanly; see the merge policy in _same_place below.
 NAME_MATCH_THRESHOLD = 90
 
 CSV_COLUMNS = [
-    "creator", "place_name_en", "place_name_local", "neighborhood", "city",
-    "category", "sentiment", "price_signal", "maps_url",
+    "channel", "subject", "category", "details", "sentiment", "link",
     "source_urls", "source_titles", "first_seen", "confidence",
 ]
 
@@ -26,20 +19,6 @@ def normalize_name(name) -> str:
     name = name.lower().strip()
     name = re.sub(r"[.''\-]", " ", name)
     return re.sub(r"\s+", " ", name).strip()
-
-
-def _comparison_name(name: str | None) -> str:
-    # Only for fuzzy-match scoring: strip the generic word "ramen" so it doesn't
-    # drag down the score for genuine duplicates like "Ichiran" / "Ichiran Ramen"
-    # -- real branch differentiators are place/area words, not this filler.
-    normalized = normalize_name(name)
-    return re.sub(r"\bramen\b", "", normalized).strip()
-
-
-def normalize_city(city) -> str:
-    if not isinstance(city, str):
-        return ""
-    return city.strip().lower()
 
 
 class _UnionFind:
@@ -68,7 +47,7 @@ def _merge_cluster(records: list[dict]) -> dict:
                 return r[field]
         return None
 
-    def most_common_name(field: str):
+    def most_common(field: str):
         counts: dict[str, int] = defaultdict(int)
         for r in records:
             if r.get(field):
@@ -93,15 +72,12 @@ def _merge_cluster(records: list[dict]) -> dict:
             seen_titles.append(r["source_title"])
 
     return {
-        "creator": records[0]["creator"],
-        "place_name_en": most_common_name("place_name_en"),
-        "place_name_local": most_common_name("place_name_local"),
-        "neighborhood": first_non_null("neighborhood"),
-        "city": first_non_null("city"),
+        "channel": records[0]["channel"],
+        "subject": most_common("subject"),
         "category": best_by_confidence("category"),
+        "details": best_by_confidence("details"),
         "sentiment": best_by_confidence("sentiment"),
-        "price_signal": best_by_confidence("price_signal"),
-        "maps_url": first_non_null("maps_url"),
+        "link": first_non_null("link"),
         "source_urls": "|".join(seen_urls),
         "source_titles": "|".join(seen_titles),
         "first_seen": records[0]["published_at"],
@@ -109,55 +85,35 @@ def _merge_cluster(records: list[dict]) -> dict:
     }
 
 
-def _same_place(a: dict, b: dict) -> bool:
-    name_a = _comparison_name(a.get("place_name_en") or a.get("place_name_local"))
-    name_b = _comparison_name(b.get("place_name_en") or b.get("place_name_local"))
+def _same_item(a: dict, b: dict) -> bool:
+    name_a = normalize_name(a.get("subject"))
+    name_b = normalize_name(b.get("subject"))
     if not name_a or not name_b:
         return False
 
-    # maps_url is the strongest signal available -- let it decide outright when
-    # both sides have one, regardless of city/neighborhood text (which may be
-    # null on one side while a maps_url still confirms the same place).
-    maps_url_a, maps_url_b = a.get("maps_url"), b.get("maps_url")
-    if maps_url_a and maps_url_b:
-        return maps_url_a == maps_url_b
-
-    # Without a maps_url match, require a confirmed shared city AND neighborhood
-    # before trusting name similarity -- many ramen shops share generic naming,
-    # and a missing city/neighborhood on either side could just as easily mean a
-    # different branch as the same one. Undermerge over overmerge.
-    city_a, city_b = normalize_city(a.get("city")), normalize_city(b.get("city"))
-    if not city_a or not city_b or city_a != city_b:
-        return False
-    neighborhood_a, neighborhood_b = normalize_name(a.get("neighborhood")), normalize_name(b.get("neighborhood"))
-    if not neighborhood_a or not neighborhood_b or neighborhood_a != neighborhood_b:
-        return False
+    link_a, link_b = a.get("link"), b.get("link")
+    if link_a and link_b:
+        return link_a == link_b
 
     return fuzz.ratio(name_a, name_b) >= NAME_MATCH_THRESHOLD
 
 
-def dedupe_places(places: list[dict]) -> list[dict]:
-    # A single pass over all places (not pre-bucketed by city) so the maps_url
-    # shortcut in _same_place can still catch a match even when one mention has
-    # a null/differently-cased city and the other doesn't.
-    uf = _UnionFind(len(places))
-    for i in range(len(places)):
-        for j in range(i + 1, len(places)):
-            if _same_place(places[i], places[j]):
+def dedupe_items(items: list[dict]) -> list[dict]:
+    uf = _UnionFind(len(items))
+    for i in range(len(items)):
+        for j in range(i + 1, len(items)):
+            if _same_item(items[i], items[j]):
                 uf.union(i, j)
 
     clusters: dict[int, list[dict]] = defaultdict(list)
-    for idx, place in enumerate(places):
-        clusters[uf.find(idx)].append(place)
+    for idx, item in enumerate(items):
+        clusters[uf.find(idx)].append(item)
 
     merged = [_merge_cluster(cluster) for cluster in clusters.values()]
-    merged.sort(key=lambda p: (p["neighborhood"] is None, p["neighborhood"] or "", p["place_name_en"] or p["place_name_local"] or ""))
+    merged.sort(key=lambda r: (r["subject"] or ""))
     return merged
 
 
-# Excel/Sheets treats a cell starting with any of these as a formula. Values
-# here ultimately trace back to arbitrary YouTube video text via Claude, so
-# guard against CSV formula injection when the CSV is opened in a spreadsheet.
 _FORMULA_PREFIXES = ("=", "+", "-", "@")
 
 
@@ -167,21 +123,21 @@ def _csv_safe(value):
     return value
 
 
-def write_csv(places: list[dict], output_path: str) -> None:
+def write_csv(items: list[dict], output_path: str) -> None:
     with open(output_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS)
         writer.writeheader()
-        for place in places:
-            writer.writerow({col: _csv_safe(place.get(col)) for col in CSV_COLUMNS})
+        for item in items:
+            writer.writerow({col: _csv_safe(item.get(col)) for col in CSV_COLUMNS})
 
 
-def export_case(places: list[dict], case: dict) -> None:
-    deduped = dedupe_places(places)
+def export_case(items: list[dict], case: dict) -> None:
+    deduped = dedupe_items(items)
     write_csv(deduped, case["output_csv"])
-    low_confidence = sum(1 for p in deduped if p["confidence"] == "low")
+    low_confidence = sum(1 for r in deduped if r["confidence"] == "low")
 
     print()
     print("== Summary ==")
-    print(f"Unique shops: {len(deduped)}")
-    print(f"Low-confidence shops: {low_confidence}")
+    print(f"Unique items: {len(deduped)}")
+    print(f"Low-confidence items: {low_confidence}")
     print(f"CSV written to: {case['output_csv']}")

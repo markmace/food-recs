@@ -1,14 +1,15 @@
 import json
 from pathlib import Path
 
-MODEL = "claude-haiku-4-5"
+from cost import MODEL
 
 VALID_SENTIMENTS = {"loved", "liked", "mixed", "negative"}
 VALID_CONFIDENCE = {"high", "medium", "low"}
 
-EXTRACTION_PROMPT = """You are extracting structured data about ramen shops mentioned in a \
-YouTube video, for a personal database of ramen recommendations.
+EXTRACTION_PROMPT = """You are extracting structured data from a YouTube video for a personal \
+database.
 
+Topic: {topic}
 Channel: {channel}
 Video title: {title}
 Video URL: {url}
@@ -16,26 +17,21 @@ Published: {published_at}
 Video description:
 {description}
 
-Identify every distinct ramen shop mentioned in the title/description as being featured, \
-visited, or recommended in this video. A video may feature multiple shops, or none (e.g. a \
-compilation intro, a non-ramen video, or a video where no specific restaurant is named).
+Identify every distinct subject mentioned in the title/description that fits the topic. A \
+video may mention multiple subjects, or none (e.g. an intro, off-topic video, or one with \
+nothing specific to extract).
 
-For each shop, output a JSON object with these fields:
-- place_name_en: the shop's name in English/romaji, or null if unknown
-- place_name_local: the shop's name in Japanese script if given, or null
-- neighborhood: the neighborhood/area mentioned (e.g. Shibuya, Ebisu), or null if not mentioned
-- city: the city the shop is in, inferred from context. Keep this to the city name only \
-(e.g. "Tokyo") -- put neighborhood-level detail in the neighborhood field instead. Use null \
-only if truly unclear.
-- category: the ramen style if mentioned (e.g. shoyu, shio, tonkotsu, tsukemen, miso), or null
+For each subject, output a JSON object with these fields:
+- subject: the name or title of what's being discussed
+- category: a type or classification if mentioned, or null
+- details: relevant context (location, specs, price, etc.), or null
 - sentiment: one of "loved", "liked", "mixed", "negative", or null if unclear
-- price_signal: any price info mentioned (e.g. "¥980", "budget", "pricey"), or null
-- maps_url: a Google Maps URL for the shop if one appears in the description, or null
-- confidence: "high" if clearly and unambiguously named, "medium" if reasonably confident, \
+- link: a relevant URL from the description if one appears, or null
+- confidence: "high" if clearly and unambiguously identified, "medium" if reasonably confident, \
 "low" if you are guessing/inferring
 
-Respond with ONLY a JSON array of these objects (use [] if no shops are featured). Do not \
-include any other text, explanation, or markdown formatting."""
+Respond with ONLY a JSON array of these objects (use [] if nothing fits). Do not include any \
+other text, explanation, or markdown formatting."""
 
 
 def keyword_match(video: dict, keywords: list[str]) -> bool:
@@ -43,34 +39,36 @@ def keyword_match(video: dict, keywords: list[str]) -> bool:
     return any(keyword.lower() in haystack for keyword in keywords)
 
 
-def classify_relevance(video: dict, case: dict, client) -> bool:
-    prompt = f"""A YouTube channel called "{case['channel']}" posted a video. We're looking \
-for videos that feature specific ramen shop recommendations, but this one's title/description \
-didn't match our keyword list ({', '.join(case['filter_keywords'])}).
+def classify_relevance(video: dict, case: dict, client, tracker) -> bool:
+    prompt = f"""A YouTube channel called "{case['channel']}" posted a video. We're collecting \
+videos about: {case['topic']}
+
+This video didn't match our keyword list ({', '.join(case['filter_keywords'])}):
 
 Title: {video['title']}
 Description: {video['description'][:1500]}
 
-Does this video likely feature one or more specific ramen restaurants? Answer with exactly \
-one word: yes or no."""
+Does this video likely mention one or more specific subjects that fit that topic? Answer with \
+exactly one word: yes or no."""
 
     response = client.messages.create(
         model=MODEL,
         max_tokens=10,
         messages=[{"role": "user", "content": prompt}],
     )
+    tracker.record("filter", response.usage)
     answer = response.content[0].text.strip().lower()
     return answer.startswith("y")
 
 
-def filter_videos(videos: list[dict], case: dict, client) -> tuple[list[dict], dict]:
+def filter_videos(videos: list[dict], case: dict, client, tracker) -> tuple[list[dict], dict]:
     kept = []
     stats = {"keyword_matched": 0, "llm_matched": 0, "dropped": 0}
     for video in videos:
         if keyword_match(video, case["filter_keywords"]):
             kept.append(video)
             stats["keyword_matched"] += 1
-        elif classify_relevance(video, case, client):
+        elif classify_relevance(video, case, client, tracker):
             kept.append(video)
             stats["llm_matched"] += 1
         else:
@@ -92,64 +90,59 @@ def try_parse_json_array(text: str) -> list | None:
     return data if isinstance(data, list) else None
 
 
-# String-typed fields that must actually be strings (or None) by the time they
-# reach export.py's dedupe/CSV logic -- Claude occasionally nests an object or
-# list where a plain string was asked for, and downstream code assumes str.
-STRING_FIELDS = ("place_name_en", "place_name_local", "neighborhood", "city",
-                  "category", "price_signal", "maps_url")
+STRING_FIELDS = ("subject", "category", "details", "link")
 
 
-def validate_shops(shops: list, video: dict, case: dict, url: str) -> list[dict]:
+def validate_items(items: list, video: dict, case: dict, url: str) -> list[dict]:
     result = []
-    for shop in shops:
-        if not isinstance(shop, dict):
+    for item in items:
+        if not isinstance(item, dict):
             continue
-        # Fields we already know -- overwrite rather than trust the model's echo.
-        shop["creator"] = case["channel"]
-        shop["source_url"] = url
-        shop["source_title"] = video["title"]
-        shop["published_at"] = video["published_at"]
-        if not shop.get("place_name_en") and not shop.get("place_name_local"):
-            continue  # no usable name -- drop rather than emit a nameless row
+        item["channel"] = case["channel"]
+        item["source_url"] = url
+        item["source_title"] = video["title"]
+        item["published_at"] = video["published_at"]
+        if not item.get("subject"):
+            continue
         for key in STRING_FIELDS:
-            if not isinstance(shop.get(key), str):
-                shop[key] = None
-        # isinstance check first: an unhashable value (list/dict) would raise on
-        # the `in` membership test otherwise.
-        if not isinstance(shop.get("sentiment"), str) or shop["sentiment"] not in VALID_SENTIMENTS:
-            shop["sentiment"] = None
-        if not isinstance(shop.get("confidence"), str) or shop["confidence"] not in VALID_CONFIDENCE:
-            shop["confidence"] = None
-        result.append(shop)
+            if not isinstance(item.get(key), str):
+                item[key] = None
+        if not isinstance(item.get("sentiment"), str) or item["sentiment"] not in VALID_SENTIMENTS:
+            item["sentiment"] = None
+        if not isinstance(item.get("confidence"), str) or item["confidence"] not in VALID_CONFIDENCE:
+            item["confidence"] = None
+        result.append(item)
     return result
 
 
-def extract_shops_from_video(video: dict, case: dict, client) -> list[dict]:
+def extract_items_from_video(video: dict, case: dict, client, tracker) -> list[dict]:
     url = f"https://www.youtube.com/watch?v={video['video_id']}"
     prompt = EXTRACTION_PROMPT.format(
-        channel=case["channel"], title=video["title"], url=url,
+        topic=case["topic"], channel=case["channel"], title=video["title"], url=url,
         published_at=video["published_at"], description=video["description"],
     )
     messages = [{"role": "user", "content": prompt}]
     response = client.messages.create(model=MODEL, max_tokens=2048, messages=messages)
+    tracker.record("extract", response.usage)
     text = response.content[0].text
-    shops = try_parse_json_array(text)
+    items = try_parse_json_array(text)
 
-    if shops is None:
+    if items is None:
         messages.append({"role": "assistant", "content": text})
         messages.append({"role": "user", "content":
             "That was not valid JSON. Respond with ONLY a valid JSON array "
             "(or [] if none), no other text."})
         response = client.messages.create(model=MODEL, max_tokens=2048, messages=messages)
-        shops = try_parse_json_array(response.content[0].text)
-        if shops is None:
+        tracker.record("extract", response.usage)
+        items = try_parse_json_array(response.content[0].text)
+        if items is None:
             print(f"WARNING: giving up on malformed JSON for video {video['video_id']} after retry")
             return []
 
-    return validate_shops(shops, video, case, url)
+    return validate_items(items, video, case, url)
 
 
-def load_or_extract(videos: list[dict], case: dict, client) -> list[dict]:
+def load_or_extract(videos: list[dict], case: dict, client, tracker) -> list[dict]:
     cache_path = Path("data/extracted") / f"{case['name']}.jsonl"
     cache_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -158,17 +151,17 @@ def load_or_extract(videos: list[dict], case: dict, client) -> list[dict]:
         with open(cache_path) as f:
             for line in f:
                 record = json.loads(line)
-                cached[record["video_id"]] = record["places"]
+                cached[record["video_id"]] = record["items"]
 
-    all_places = []
+    all_items = []
     with open(cache_path, "a") as f:
         for video in videos:
             if video["video_id"] in cached:
-                places = cached[video["video_id"]]
+                items = cached[video["video_id"]]
             else:
-                places = extract_shops_from_video(video, case, client)
-                f.write(json.dumps({"video_id": video["video_id"], "places": places}) + "\n")
+                items = extract_items_from_video(video, case, client, tracker)
+                f.write(json.dumps({"video_id": video["video_id"], "items": items}) + "\n")
                 f.flush()
-            all_places.extend(places)
+            all_items.extend(items)
 
-    return all_places
+    return all_items

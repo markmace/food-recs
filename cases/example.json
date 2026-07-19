@@ -1,0 +1,8 @@
+{
+  "name": "example",
+  "source": "youtube",
+  "channel": "Your YouTube Channel",
+  "topic": "product reviews",
+  "filter_keywords": ["review", "hands-on", "verdict"],
+  "output_csv": "data/example.csv"
+}

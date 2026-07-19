@@ -6,6 +6,7 @@ from pathlib import Path
 import anthropic
 from dotenv import load_dotenv
 
+from cost import CostTracker
 from export import export_case
 from extract import filter_videos, load_or_extract
 from youtube import load_or_fetch_videos
@@ -29,17 +30,21 @@ def main():
         sys.exit(f"Case file {case_path} is not valid JSON: {e}")
 
     client = anthropic.Anthropic()  # raises its own clear error if ANTHROPIC_API_KEY unset
+    tracker = CostTracker()
 
     videos = load_or_fetch_videos(case, yt_api_key)
     print(f"Fetched {len(videos)} videos total")
 
-    filtered, filter_stats = filter_videos(videos, case, client)
+    filtered, filter_stats = filter_videos(videos, case, client, tracker)
     print(f"Keyword-matched: {filter_stats['keyword_matched']}, "
           f"LLM-matched: {filter_stats['llm_matched']}, "
           f"Dropped: {filter_stats['dropped']}")
 
-    places = load_or_extract(filtered, case, client)
-    export_case(places, case)
+    items = load_or_extract(filtered, case, client, tracker)
+    export_case(items, case)
+
+    cost_path = tracker.write(case)
+    print(f"Cost report written to: {cost_path}")
 
 
 if __name__ == "__main__":

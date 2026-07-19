@@ -1,11 +1,10 @@
-# 🍜 food-recs
+# food-recs
 
-Turn a food creator's YouTube videos into a clean, structured CSV of restaurant
-recommendations — place names, neighborhoods, sentiment, and source links, deduped
-across videos.
+Extract structured data from a YouTube channel into a CSV — filter videos, pull out
+subjects with Claude, dedupe across videos, and write one row per item.
 
-Built for a first run against [5 AM Ramen](https://www.youtube.com/@5amramen)'s Tokyo
-videos, but works for any channel — just point it at a new case file.
+Example uses: every product a reviewer covers, every place mentioned in travel videos,
+tools referenced in a tutorial channel, etc.
 
 ## How it works
 
@@ -18,12 +17,16 @@ YouTube API  →  filter  →  Claude (Haiku)  →  dedupe  →  CSV
 2. **Filter** — keeps videos matching your keywords; anything ambiguous gets a cheap
    yes/no relevance check from Claude instead of being silently dropped.
 3. **Extract** — Claude reads each video's title/description and pulls out structured
-   shop details (name, neighborhood, category, sentiment, confidence, etc).
-4. **Dedupe & export** — merges the same shop mentioned across multiple videos and
-   writes one row per unique place to a CSV.
+   fields (subject, category, details, sentiment, confidence, etc).
+4. **Dedupe & export** — merges the same subject mentioned across multiple videos and
+   writes one row per unique item to a CSV.
 
 Results are cached along the way (`data/raw/`, `data/extracted/`), so re-running a case
 is fast and doesn't re-spend API calls.
+
+Every run also writes a cost report next to the CSV (e.g. `data/my_case_cost.json`) with
+a token and dollar breakdown by pipeline stage (filtering vs. extraction) for the API
+calls actually made *that run* — a fully-cached rerun reports close to $0.
 
 ## Setup
 
@@ -49,43 +52,29 @@ cp .env.example .env
 
 ## Usage
 
+Copy the example case and configure it for a channel and topic you care about:
+
 ```bash
-uv run python run.py cases/tokyo_ramen.json
+cp cases/example.json cases/my_case.json
+# edit my_case.json — set channel, topic, filter_keywords, output_csv
+uv run python run.py cases/my_case.json
 ```
 
-This writes `data/tokyo_ramen.csv` and prints a summary:
-
-```
-Fetched 142 videos total
-Keyword-matched: 38, LLM-matched: 6, Dropped: 98
-
-== Summary ==
-Total videos fetched: 142
-Filtered in: 44 (keyword: 38, LLM: 6, dropped: 98)
-Unique shops: 31
-Low-confidence shops: 4
-CSV written to: data/tokyo_ramen.csv
-```
-
-## Adding a new case
-
-A "case" is just a JSON file describing what channel to pull and what to filter for:
+## Case file format
 
 ```json
 {
-  "name": "osaka_ramen",
+  "name": "my_case",
   "source": "youtube",
-  "channel": "Some Other Channel",
-  "filter_keywords": ["osaka", "namba", "umeda"],
-  "output_csv": "data/osaka_ramen.csv"
+  "channel": "Channel Name",
+  "topic": "product reviews",
+  "filter_keywords": ["review", "hands-on"],
+  "output_csv": "data/my_case.csv"
 }
 ```
 
-Drop it in `cases/` and run it the same way:
-
-```bash
-uv run python run.py cases/osaka_ramen.json
-```
+`topic` drives the LLM prompts — describe what you're trying to collect in plain
+language. `filter_keywords` narrow which videos get processed.
 
 ## Notes
 
@@ -93,3 +82,5 @@ uv run python run.py cases/osaka_ramen.json
   won't pick up new videos the channel posts later. Delete that file to force a refetch.
 - Extraction uses `claude-haiku-4-5` — fast and cheap, good fit for this kind of
   structured pulling.
+- Cost reports use hardcoded per-million-token pricing (`cost.py`) — update it there if
+  pricing changes or you switch models.

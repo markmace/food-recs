@@ -1,7 +1,7 @@
 [project]
 name = "food-recs"
 version = "0.1.0"
-description = "Add your description here"
+description = "Extract structured data from a YouTube channel into CSV"
 requires-python = ">=3.12"
 dependencies = [
     "anthropic>=0.117.0",
